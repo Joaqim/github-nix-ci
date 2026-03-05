@@ -113,9 +113,13 @@ in
                 };
 
                 tokenFile = lib.mkOption {
-                  type = types.path;
+                      type = with types; nullOr path;
                   description = "The path to the token file for this runner";
-                  default = top.config.age.secrets."github-nix-ci/${name}.token.age".path;
+                      default =
+                        if top.config ? age then
+                          top.config.age.secrets."github-nix-ci/${config.output.user}.token.age".path
+                        else
+                          null;
                   defaultText = "The agenix secret file at the conventional path";
                 };
 
@@ -148,9 +152,13 @@ in
                 };
 
                 tokenFile = lib.mkOption {
-                  type = types.path;
+                      type = with types; nullOr path;
                   description = "The path to the token file for this runner";
-                  default = top.config.age.secrets."github-nix-ci/${config.output.user}.token.age".path;
+                      default =
+                        if top.config ? age then
+                          top.config.age.secrets."github-nix-ci/${config.output.user}.token.age".path
+                        else
+                          null;
                   defaultText = "The agenix secret file at the conventional path";
                 };
 
@@ -198,7 +206,9 @@ in
       default = { };
     };
   };
-  config = {
+  config = lib.mkMerge (
+    [
+    {
     # Each org gets its own set of runners. There will be at max `num` parallels
     # CI builds for this org / host combination.
     services.github-runners =
@@ -207,27 +217,13 @@ in
           forAttr config.services.github-nix-ci.personalRunners (_: cfg: cfg.output.runners)
           ++ forAttr config.services.github-nix-ci.orgRunners (_: cfg: cfg.output.runners);
       in
-      builtins.foldl' (a: b: lib.mkMerge [ a b ]) { } runners;
-
-    age.secrets =
-      let
-        inherit (config.services.github-nix-ci.age) secretsDir;
-        ageSecretConfigFor = name:
-          let fname = "github-nix-ci/${name}.token.age";
-          in lib.nameValuePair fname {
-            inherit (config.services.github-nix-ci.output.runner) owner;
-            file = "${secretsDir}/${fname}";
-          };
-      in
-      lib.mkIf (secretsDir != null)
-        (lib.listToAttrs
-          (forAttr config.services.github-nix-ci.orgRunners
-            (name: _: ageSecretConfigFor name)
-          ++
-          forAttr config.services.github-nix-ci.personalRunners
-            (name: cfg: ageSecretConfigFor cfg.output.user)
-          ));
-
+        builtins.foldl' (
+            a: b:
+            lib.mkMerge [
+              a
+              b
+            ]
+        ) { } runners;
 
     # User (Linux only)
     users.users.${user} = lib.mkIf isLinux {
@@ -238,5 +234,75 @@ in
     nix.settings.trusted-users = [
       (if isLinux then user else "_github-runner")
     ];
-  };
+
+      # Assertions
+      assertions = [
+        {
+          assertion =
+            let
+              orgNeedsAge = lib.filterAttrs (
+                _: cfg: cfg.tokenFile == null
+              ) config.services.github-nix-ci.orgRunners;
+              personalNeedsAge = lib.filterAttrs (
+                _: cfg: cfg.tokenFile == null
+              ) config.services.github-nix-ci.personalRunners;
+              anyNeedsAge = orgNeedsAge != { } || personalNeedsAge != { };
+            in
+            !anyNeedsAge || config.services.github-nix-ci.age.secretsDir != null;
+          message = ''
+            github-nix-ci: `age.secretsDir` must be set when any runner is configured without an explicit `tokenFile`.
+            Either set `services.github-nix-ci.age.secretsDir`, or provide a `tokenFile` for every runner.
+          '';
+        }
+        {
+          assertion =
+            let
+              orgNames = builtins.attrNames config.services.github-nix-ci.orgRunners;
+              personalNames = map (_: cfg: cfg.output.user) (
+                builtins.attrValues config.services.github-nix-ci.personalRunners
+              );
+              allNames = orgNames ++ personalNames;
+              dupes = builtins.filter (
+                name: builtins.length (builtins.filter (n: n == name) allNames) > 1
+              ) allNames;
+            in
+            dupes == [ ];
+          message =
+            let
+              orgNames = builtins.attrNames config.services.github-nix-ci.orgRunners;
+              personalNames = map (cfg: cfg.output.user) (
+                builtins.attrValues config.services.github-nix-ci.personalRunners
+              );
+              allNames = orgNames ++ personalNames;
+              dupes = lib.unique (
+                builtins.filter (name: builtins.length (builtins.filter (n: n == name) allNames) > 1) allNames
+              );
+            in
+            "github-nix-ci: duplicate runner names detected: ${lib.concatStringsSep ", " dupes}. "
+            + "org and personal runner names must not collide.";
+        }
+      ];
+    }
+    ]
+    ++ lib.optionals (top.options ? age && config.services.github-nix-ci.age.secretsDir != null) [
+      {
+      age.secrets =
+        let
+          inherit (config.services.github-nix-ci.age) secretsDir;
+          ageSecretConfigFor =
+            name:
+              lib.nameValuePair "github-nix-ci/${name}.token.age" {
+              inherit (config.services.github-nix-ci.output.runner) owner;
+                file = "${secretsDir}/github-nix-ci/${name}.token.age";
+            };
+        in
+        lib.listToAttrs (
+          forAttr config.services.github-nix-ci.orgRunners (name: _: ageSecretConfigFor name)
+          ++ forAttr config.services.github-nix-ci.personalRunners (
+            name: cfg: ageSecretConfigFor cfg.output.user
+          )
+        );
+      }
+    ]
+  );
 }
