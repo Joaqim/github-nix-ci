@@ -41,7 +41,7 @@ let
   extraLabels = [ host ] ++ supportedSystems;
 
   # Packages that will be made available to all runners.
-  extraPackages =
+  runnerPackages =
     let
       # https://github.com/actions/upload-pages-artifact/blob/56afc609e74202658d3ffba0e8f6dda462b719fa/action.yml#L40
       gtar = pkgs.runCommand "gtar" { } ''
@@ -49,13 +49,8 @@ let
         ln -s ${lib.getExe pkgs.gnutar} $out/bin/gtar
       '';
     in
-    with pkgs; [
-      # For nix builds
-      nix
-      nixci
-      # For those that use Cachix
-      cachix
-
+    with pkgs;
+    [
       # Tools already available in standard GitHub Runners; so we provide
       # them here:
       coreutils
@@ -73,8 +68,9 @@ let
     replace = true;
     ephemeral = true;
     noDefaultLabels = true;
-    extraPackages = extraPackages ++ config.services.github-nix-ci.runnerSettings.extraPackages;
-  } // lib.optionalAttrs isLinux { inherit user group; };
+    extraPackages = runnerPackages ++ config.services.github-nix-ci.runnerSettings.extraPackages;
+  }
+  // lib.optionalAttrs isLinux { inherit user group; };
   user = "github-runner";
   group = "github-runner";
 
@@ -97,8 +93,18 @@ in
 
           runnerSettings = {
             extraPackages = lib.mkOption {
-              type = types.listOf types.package;
+              type = with types; listOf types.package;
               default = [ ];
+              example = lib.literalExpression ''
+                  with pkgs; [
+                  # For nix builds
+                  nix
+                  nixci
+                  
+                  # For those that use Cachix
+                  cachix
+                ]
+              '';
               description = ''
                 Extra packages to be installed on all runners
               '';
